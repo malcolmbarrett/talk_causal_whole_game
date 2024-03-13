@@ -1,0 +1,615 @@
+---
+title: "Causal Inference in R: The Whole Game"
+author: "Malcolm Barrett"
+format: kakashi-revealjs
+---
+
+```{r setup, include=FALSE}
+options(
+  tibble.max_extra_cols = 6, 
+  tibble.width = 60,
+  tidyverse.quiet = TRUE,
+  propensity.quiet = TRUE,
+  tipr.verbose = FALSE,
+  ggplot2.discrete.colour = ggokabeito::palette_okabe_ito(),
+  ggplot2.discrete.fill = ggokabeito::palette_okabe_ito(),
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
+)
+
+library(tidyverse)
+
+theme_set(
+  theme_minimal(
+    base_size = 14,
+  ) %+replace%
+    theme(
+      panel.grid.minor = element_blank(),
+      legend.position = "bottom"
+    )
+)
+```
+
+# *Causal Inference in R* {background-color="#23373B"}
+
+## {background-color="#23373B"}
+
+::: {.center}
+![](images/r-causal-hex.png){width=500}
+:::
+
+## Causal Inference in R: The Book
+
+</br>
+</br>
+
+:::: {.columns}
+
+::: {.column width="50%"}
+
+![](images/ch_5.png){style="transform: rotate(-15deg);"}
+:::
+
+::: {.column width="50%"}
+![](images/ch_6.png){style="transform: rotate(15deg);"}
+:::
+
+::::
+
+</br>
+
+::: {.center .huge}
+<https://www.r-causal.org/>
+:::
+
+
+## {background-color="#23373B"}
+
+1.  Specify a causal question
+2.  Draw our assumptions using a causal diagram
+3.  Model our assumptions
+4.  Diagnose our models
+5.  Estimate the causal effect
+6.  Conduct sensitivity analysis on the effect estimate
+
+# *Does using a bed net (a mosquito net) reduce the risk of malaria?* {background-color="#23373B"}
+
+## Honing questions {.large}
+
+. . . 
+
+*What do we mean by "bed net"?* 
+
+. . .
+
+*Risk compared to what?*
+
+. . .
+
+*Risk as defined by what?*
+
+. . .
+
+*Risk among whom?*
+
+# Does using insecticide-treated bed nets compared to no nets decrease the risk of contracting malaria after 1 year? {background-color="#23373B"}
+
+## The data
+
+> researchers are interested in whether using mosquito nets decreases an individual's risk of contracting malaria.
+> They have collected data from 1,752 households in an unnamed country and have variables related to environmental factors, individual health, and household characteristics.
+> The data is **not experimental**---researchers have no control over who uses mosquito nets, and individual households make their own choices over whether to apply for free nets or buy their own nets, as well as whether they use the nets if they have them.
+
+:::{.small}
+Thanks to [Dr. Andrew Heiss](andrewheiss.com)
+:::
+
+## The data
+
+```{r}
+library(causalworkshop)
+net_data
+```
+
+## The data
+
+```{r}
+library(tidyverse)
+net_data |>
+  ggplot(aes(malaria_risk, fill = net)) +
+  geom_density(color = NA, alpha = .8)
+```
+
+
+# *Draw our assumptions* {background-color="#23373B"}
+
+## 
+
+```{r}
+#| echo: false
+library(ggdag, warn.conflicts = FALSE)
+library(ggokabeito)
+mosquito_dag <- dagify(
+  malaria_risk ~ net + income + health + temperature + resistance,
+  net ~ income + health + temperature + eligible + household,
+  eligible ~ income + household,
+  health ~ income,
+  exposure = "net",
+  outcome = "malaria_risk",
+  coords = list(
+    x = c(
+      malaria_risk = 7,
+      net = 3,
+      income = 4,
+      health = 5,
+      temperature = 6,
+      resistance = 8.5,
+      eligible = 2,
+      household = 1
+    ),
+    y = c(
+      malaria_risk = 2,
+      net = 2,
+      income = 3,
+      health = 1,
+      temperature = 3,
+      resistance = 2,
+      eligible = 3,
+      household = 2
+    )
+  ),
+  labels = c(
+    malaria_risk = "Risk of\nmalaria",
+    net = "Mosquito net",
+    income = "Income",
+    health = "Health",
+    temperature = "Nighttime\ntemperatures",
+    resistance = "Insecticide\nresistance",
+    eligible = "Eligible\nfor program",
+    household = "Number in\nthe household"
+  )
+)
+
+mosquito_dag |>
+  tidy_dagitty() |>
+  node_status() |>
+  ggplot(
+    aes(x, y, xend = xend, yend = yend, color = status)
+  ) +
+  geom_dag_edges() +
+  geom_dag_point() +
+  geom_dag_label_repel2(aes(label = label), color = "black", box.padding = 2) +
+  scale_color_okabe_ito(na.value = "grey90") +
+  theme_dag() +
+  theme(legend.position = "none") +
+  coord_cartesian(clip = "off")
+```
+##
+
+```{r}
+#| echo: false
+#| fig.width: 14
+#| fig.height: 10
+glyph <- function(data, params, size) {
+  data$shape <- 15
+  data$size <- 12
+  ggplot2::draw_key_point(data, params, size)
+}
+
+mosquito_dag |>
+  dag_paths() |>
+  mutate(
+    effects = case_when(
+      set == "1" & path == "open path" ~ "true effect",
+      path == "open path" ~ "confounding effect",
+      TRUE ~ NA_character_
+    ),
+    effects = factor(effects, c("true effect", "confounding effect"))
+  ) |>
+  ggplot(aes(x = x, y = y, xend = xend, yend = yend, color = effects, alpha = path)) +
+  geom_dag_edges(aes(edge_alpha = path, edge_colour = effects), show.legend = FALSE) +
+  geom_dag_point(
+    data = function(.x) dplyr::filter(.x, is.na(path)),
+    key_glyph = glyph
+  ) +
+  geom_dag_point(
+    data = function(.x) dplyr::filter(.x, !is.na(path)),
+    key_glyph = glyph
+  ) +
+  facet_wrap(vars(fct_inorder(factor(set)))) +
+  expand_plot(
+    expand_x = expansion(c(0.25, 0.25)),
+    expand_y = expansion(c(0.1, 0.1))
+  ) +
+  theme_dag() +
+  theme(
+    legend.position = "top",
+    legend.spacing.x = unit(8, "mm"),
+    legend.text = element_text(size = rel(2.5)),
+    legend.box.margin = margin(b = 20),
+    strip.text = element_blank()
+  ) +
+  coord_cartesian(clip = "off") +
+  scale_alpha_manual(
+    drop = FALSE,
+    values = c("open path" = 1),
+    na.value = .5,
+    breaks = "open path"
+  ) +
+  ggraph::scale_edge_alpha_manual(
+    drop = FALSE,
+    values = c("open path" = 1),
+    na.value = .5,
+    breaks = "open path"
+  ) +
+  scale_color_okabe_ito(
+    name = NULL,
+    na.value = "grey90",
+    order = c(3, 6),
+    breaks = c("true effect", "confounding effect")
+  ) +
+  scale_edge_color_okabe_ito(
+    name = NULL,
+    na.value = "grey90",
+    order = c(3, 6),
+    breaks = c("true effect", "confounding effect")
+  ) +
+  guides(alpha = "none", edge_alpha = "none")
+```
+
+# *Model our assumptions* {background-color="#23373B"}
+
+## Propensity scores
+
+```{r}
+#| code-line-numbers: "|1-5|2"
+propensity_model <- glm(
+  net ~ income + health + temperature,
+  data = net_data,
+  family = binomial()
+)
+
+# the first six propensity scores
+head(predict(propensity_model, type = "response"))
+```
+
+## Inverse probabilty weights
+
+```{r}
+#| code-line-numbers: "|1,3|2,7"
+#| output-location: slide
+library(broom)
+library(propensity)
+net_data_wts <- propensity_model |>
+  augment(newdata = net_data, type.predict = "response") |>
+  # .fitted is the value predicted by the model
+  # for a given observation
+  mutate(wts = wt_ate(.fitted, net))
+
+net_data_wts |>
+  select(net, .fitted, wts) |>
+  head()
+```
+
+# *Diagnosing our model* {background-color="#23373B"}
+
+## Population-level balance
+
+```{r}
+#| code-line-numbers: "|1-3"
+#| output-location: slide
+library(halfmoon)
+ggplot(net_data_wts, aes(.fitted)) +
+  geom_mirror_histogram(
+    aes(fill = net),
+    bins = 50
+  ) +
+  scale_y_continuous(labels = abs) +
+  labs(x = "propensity score")
+```
+
+## Population-level balance
+
+```{r}
+#| code-line-numbers: "|6-10"
+#| output-location: slide
+ggplot(net_data_wts, aes(.fitted)) +
+  geom_mirror_histogram(
+    aes(group = net),
+    bins = 50
+  ) +
+  geom_mirror_histogram(
+    aes(fill = net, weight = wts),
+    bins = 50,
+    alpha = .5
+  ) +
+  scale_y_continuous(labels = abs) +
+  labs(x = "propensity score")
+```
+
+## Variable-level balance {.small}
+
+```{r}
+#| code-line-numbers: "|1-6|8-17|17"
+#| output-location: slide
+plot_df <- tidy_smd(
+  net_data_wts,
+  c(income, health, temperature),
+  .group = net,
+  .wts = wts
+)
+
+ggplot(
+  plot_df,
+  aes(
+    x = abs(smd),
+    y = variable,
+    group = method,
+    color = method
+  )
+) +
+  geom_love()
+```
+
+# *Estimate the causal effect* {background-color="#23373B"}
+
+## The outcome model
+
+```{r}
+#| code-line-numbers: "|2"
+#| output-location: fragment
+net_data_wts |>
+  lm(malaria_risk ~ net, data = _, weights = wts) |>
+  tidy(conf.int = TRUE) |>
+  select(term, estimate, starts_with("conf"))
+```
+
+## Bootstrapping uncertainty
+
+```{r}
+#| eval: false
+#| code-line-numbers: "|3-5|8-9"
+library(rsample)
+
+fit_ipw_not_quite_rightly <- function(split, ...) {
+  # get bootstrapped data sample with `rsample::analysis()`
+  .df <- analysis(split)
+
+  # fit ipw model
+  lm(malaria_risk ~ net, data = .df, weights = wts) |>
+    tidy()
+}
+```
+
+## Bootstrapping uncertainty {.small}
+
+```{r}
+#| code-line-numbers: "|8-12|8-9,15-17|20-21"
+library(rsample)
+
+fit_ipw <- function(split, ...) {
+  # get bootstrapped data sample with `rsample::analysis()`
+  .df <- analysis(split)
+
+  # fit propensity score model
+  propensity_model <- glm(
+    net ~ income + health + temperature,
+    data = .df,
+    family = binomial()
+  )
+
+  # calculate inverse probability weights
+  .df <- propensity_model |>
+    augment(type.predict = "response", data = .df) |>
+    mutate(wts = wt_ate(.fitted, net))
+
+  # fit correctly bootstrapped ipw model
+  lm(malaria_risk ~ net, data = .df, weights = wts) |>
+    tidy()
+}
+```
+
+## Bootstrapping uncertainty 
+
+```{r}
+#| output-location: slide
+bootstrapped_net_data <- bootstraps(
+  net_data,
+  times = 1000,
+  # required to calculate CIs later
+  apparent = TRUE
+)
+
+bootstrapped_net_data
+```
+
+. . . 
+
+<br />
+
+``` r
+fit_ipw(bootstrapped_net_data$splits[[n]])
+```
+
+## Bootstrapping uncertainty
+
+```{r}
+#| output-location: fragment
+#| cache: true
+ipw_results <- bootstrapped_net_data |>
+  mutate(boot_fits = map(splits, fit_ipw))
+
+ipw_results
+```
+
+## Bootstrapping uncertainty
+
+```{r}
+ipw_results$boot_fits[[1]]
+```
+
+## Bootstrapping uncertainty
+
+```{r}
+#| echo: false
+ipw_results |>
+  mutate(
+    estimate = map_dbl(
+      boot_fits,
+      # pull the `estimate` for `netTRUE` for each fit
+      \(.fit) .fit |>
+        filter(term == "netTRUE") |>
+        pull(estimate)
+    )
+  ) |>
+  ggplot(aes(estimate)) +
+  geom_histogram(fill = "#D55E00FF", color = "white", alpha = 0.8)
+```
+
+## Bootstrapping uncertainty
+
+```{r}
+boot_estimate <- ipw_results |>
+  # calculate T-statistic-based CIs
+  int_t(boot_fits) |>
+  filter(term == "netTRUE")
+
+boot_estimate
+```
+
+# *Conduct sensitivity analysis on the effect estimate* {background-color="#23373B"}
+
+```{r}
+#| echo: false
+options(tipr.verbose = FALSE)
+```
+
+## Genetic resistance to malaria {background-color="#23373B"}
+
+1.  People with this genetic resistance have, on average, a lower malaria risk by about 10.
+2.  About 26% of people who use nets in our study have this genetic resistance.
+3.  About 5% of people who don't use nets have this genetic resistance.
+
+## Adjusting effects
+
+```{r}
+#| code-line-numbers: "|1|5-9"
+#| output-location: fragment
+library(tipr)
+adjusted_estimates <- boot_estimate |>
+  select(.estimate, .lower, .upper) |>
+  unlist() |>
+  adjust_coef_with_binary(
+    exposed_confounder_prev = 0.26,
+    unexposed_confounder_prev = 0.05,
+    confounder_outcome_effect = -10
+  )
+
+adjusted_estimates
+```
+
+## The real DAG
+
+```{r}
+#| echo: false
+mosquito_dag_full <- dagify(
+  malaria_risk ~ net + income + health + temperature + insecticide_resistance + genetic_resistance,
+  net ~ income + health + temperature + eligible + household + genetic_resistance,
+  eligible ~ income + household,
+  health ~ income,
+  exposure = "net",
+  outcome = "malaria_risk",
+  coords = list(
+    x = c(
+      malaria_risk = 7,
+      net = 3,
+      income = 4,
+      health = 5,
+      temperature = 6,
+      insecticide_resistance = 8.5,
+      eligible = 2,
+      household = 1,
+      genetic_resistance = 8.5
+    ),
+    y = c(
+      malaria_risk = 2,
+      net = 2,
+      income = 3,
+      health = 1,
+      temperature = 3,
+      insecticide_resistance = 2,
+      eligible = 3,
+      household = 2,
+      genetic_resistance = 1
+    )
+  ),
+  labels = c(
+    malaria_risk = "Risk of malaria",
+    net = "Mosquito net",
+    income = "Income",
+    health = "Health",
+    temperature = "Nighttime temperatures",
+    insecticide_resistance = "Insecticide resistance",
+    eligible = "Eligible for program",
+    household = "Number in household",
+    genetic_resistance = "Malaria resistance"
+  )
+)
+
+mosquito_dag_full |>
+  tidy_dagitty() |>
+  node_status() |>
+  ggplot(
+    aes(x, y, xend = xend, yend = yend, color = status)
+  ) +
+  geom_dag_edges() +
+  geom_dag_point() +
+  geom_dag_label_repel2(aes(label = label), color = "black") +
+  scale_color_okabe_ito(na.value = "grey90") +
+  theme_dag() +
+  theme(legend.position = "none") +
+  coord_cartesian(clip = "off")
+```
+
+## {background-color="#23373B"}
+
+:::{.nonincremental}
+1.  Specify a causal question
+2.  Draw our assumptions using a causal diagram
+3.  Model our assumptions
+4.  Diagnose our models
+5.  Estimate the causal effect
+6.  Conduct sensitivity analysis on the effect estimate
+:::
+
+## Causal Inference in R: The Book ![](images/r-causal-hex.png){.absolute top=0 right=0 width=140}
+
+</br>
+</br>
+
+:::: {.columns}
+
+::: {.column width="50%"}
+
+![](images/ch_5.png){style="transform: rotate(-15deg);"}
+:::
+
+::: {.column width="50%"}
+![](images/ch_6.png){style="transform: rotate(15deg);"}
+:::
+
+::::
+
+</br>
+
+::: {.center .huge}
+<https://www.r-causal.org/>
+:::
+
+## Thanks! {background-color="#23373B" .huge}
+
+:::{.nonincremental}
+R Consortium 
+
+Lucy D'Agostino McGowan & Travis Gerke
+:::
